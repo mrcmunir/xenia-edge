@@ -50,7 +50,7 @@ jobs:
     if: |
       github.repository == 'mrcmunir/xenia-edge' &&
       github.event_name == 'push' &&
-      github.ref == 'refs/heads/edge'
+      github.ref == 'refs/heads/arm64'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
