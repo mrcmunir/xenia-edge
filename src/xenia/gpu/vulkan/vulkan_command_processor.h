@@ -62,7 +62,10 @@ class VulkanCommandProcessor final : public CommandProcessor {
  public:
   // Single-descriptor layouts for use within a single frame.
   enum class SingleTransientDescriptorLayout {
-    kStorageBufferCompute,
+    kStorageBuffer,
+    // Scratch buffer plus the destination image of a texture load, for the
+    // compute blit that replaces vkCmdCopyBufferToImage.
+    kStorageBufferAndStorageImage,
     kCount,
   };
 
@@ -249,6 +252,11 @@ class VulkanCommandProcessor final : public CommandProcessor {
     return descriptor_set_layouts_single_transient_[size_t(
         transient_descriptor_layout)];
   }
+  // Queues an image, its view and its memory for destruction once the
+  // submission using them now has completed. Any of them may be null.
+  void DestroyScratchImageWhenIdle(VkImage image, VkImageView image_view,
+                                   VkDeviceMemory memory);
+
   // A frame must be open.
   VkDescriptorSet AllocateSingleTransientDescriptor(
       SingleTransientDescriptorLayout transient_descriptor_layout);
@@ -694,13 +702,16 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // No specific reason for 32768, just the "too much" descriptor count from
   // Direct3D 12 PIX warnings.
   static constexpr uint32_t kLinkedTypeDescriptorPoolSetCount = 32768;
-  static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBuffer;
+  static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBufferDynamic;
   static const VkDescriptorPoolSize kDescriptorPoolSizeStorageBuffer;
+  static const VkDescriptorPoolSize kDescriptorPoolSizeStorageBufferAndImage[2];
   static const VkDescriptorPoolSize kDescriptorPoolSizeTextures[2];
   ui::vulkan::LinkedTypeDescriptorSetAllocator
       transient_descriptor_allocator_uniform_buffer_;
   ui::vulkan::LinkedTypeDescriptorSetAllocator
       transient_descriptor_allocator_storage_buffer_;
+  ui::vulkan::LinkedTypeDescriptorSetAllocator
+      transient_descriptor_allocator_storage_buffer_and_image_;
   std::deque<UsedSingleTransientDescriptor> single_transient_descriptors_used_;
   std::array<std::vector<VkDescriptorSet>,
              size_t(SingleTransientDescriptorLayout::kCount)>
@@ -933,8 +944,13 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   // Pipeline layout of the current guest graphics pipeline.
   const PipelineLayout* current_guest_graphics_pipeline_layout_;
+  // The bindings are VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, so the infos
+  // describe only the pool page and the size - the offset within the page is
+  // passed when binding and the info offset stays 0.
   VkDescriptorBufferInfo current_constant_buffer_infos_
-      [SpirvShaderTranslator::kConstantBufferCount];
+      [SpirvShaderTranslator::kConstantBufferCount]{};
+  uint32_t current_constant_buffer_dynamic_offsets_
+      [SpirvShaderTranslator::kConstantBufferCount]{};
   // Whether up-to-date data has been written to constant (uniform) buffers, and
   // the buffer infos in current_constant_buffer_infos_ point to them.
   uint32_t current_constant_buffers_up_to_date_;
@@ -981,6 +997,11 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // System shader constants, including user clip planes and tessellation
   // constants.
   SpirvShaderTranslator::SystemConstants system_constants_;
+
+  // Host viewport of the previous draw, reused while the inputs it was derived
+  // from stay the same.
+  draw_util::GetViewportInfoArgs previous_viewport_info_args_{};
+  draw_util::ViewportInfo previous_viewport_info_{};
 
   // Temporary storage for memexport stream constants used in the draw.
   std::vector<draw_util::MemExportRange> memexport_ranges_;

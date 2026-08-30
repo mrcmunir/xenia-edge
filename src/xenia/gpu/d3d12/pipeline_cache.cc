@@ -42,14 +42,6 @@
 
 #include "third_party/fmt/include/fmt/xchar.h"
 
-DEFINE_bool(d3d12_dxbc_disasm, false,
-            "Disassemble DXBC shaders after generation.", "D3D12");
-DEFINE_bool(
-    d3d12_dxbc_disasm_dxilconv, false,
-    "Disassemble DXBC shaders after conversion to DXIL, if DXIL shaders are "
-    "supported by the OS, and DirectX Shader Compiler DLLs available at "
-    "https://github.com/microsoft/DirectXShaderCompiler/releases are present.",
-    "D3D12");
 DEFINE_int32(
     d3d12_pipeline_creation_threads, -1,
     "Number of threads used for graphics pipeline creation. -1 to calculate "
@@ -119,17 +111,12 @@ PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
 PipelineCache::~PipelineCache() { Shutdown(); }
 
 bool PipelineCache::Initialize() {
-  const ui::d3d12::D3D12Provider& provider =
-      command_processor_.GetD3D12Provider();
-
-  // DXIL shader compilation is mandatory: guest and system shaders are all
-  // DXIL, so the D3D12 backend can't run without DXC.
-  dxc_shader_compiler_ = std::make_unique<DxcCompiler>(provider);
-  if (!dxc_shader_compiler_->Initialize()) {
+  // Every shader Mesa emits must be signed before D3D12 will accept it, so the
+  // backend can't run without the DXIL.dll validator.
+  if (!SpirvToDxilCompiler::IsSignerAvailable()) {
     XELOGE(
-        "Failed to initialize the DXC shader compiler. Place a recent "
-        "dxcompiler.dll next to the executable.");
-    dxc_shader_compiler_.reset();
+        "Failed to load the DXIL validator. Place a recent dxil.dll in the "
+        "D3D12 folder next to the executable.");
     return false;
   }
   // SPIR-V translator for the spirv_to_dxil guest path, FSI-aware (matches the
@@ -240,9 +227,6 @@ void PipelineCache::Shutdown() {
     delete it.second;
   }
   shaders_.clear();
-
-  // Shut down DXIL shader compilation.
-  dxc_shader_compiler_.reset();
 }
 
 void PipelineCache::InitializeShaderStorage(

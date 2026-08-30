@@ -40,8 +40,6 @@
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
 
-DEFINE_bool(debugprint_trap_log, false,
-            "Log debugprint traps to the active debugger", "CPU");
 DEFINE_bool(ignore_undefined_externs, true,
             "Don't exit when an undefined extern is called.", "CPU");
 DEFINE_bool(emit_source_annotations, false,
@@ -280,7 +278,13 @@ bool X64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
     const Instr* instr = block->instr_head;
     while (instr) {
       if (synchronize_stack_on_next_instruction_) {
-        if (instr->GetOpcodeNum() != hir::OPCODE_SOURCE_OFFSET) {
+        // The check has to land after MarkSourceOffset has stamped the
+        // guest->host mapping, or a longjmp lands past it and never runs it.
+        // With debug info on, a COMMENT precedes the SOURCE_OFFSET, so both
+        // have to be skipped, not just the source offset.
+        const hir::Opcode opcode_num = instr->GetOpcodeNum();
+        if (opcode_num != hir::OPCODE_SOURCE_OFFSET &&
+            opcode_num != hir::OPCODE_COMMENT) {
           synchronize_stack_on_next_instruction_ = false;
           EnsureSynchronizedGuestAndHostStack();
         }
@@ -303,6 +307,11 @@ bool X64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // Function epilog.
   L(epilog_label);
   epilog_label_ = nullptr;
+  // A call as the last instruction leaves the check unconsumed.
+  if (synchronize_stack_on_next_instruction_) {
+    synchronize_stack_on_next_instruction_ = false;
+    EnsureSynchronizedGuestAndHostStack();
+  }
   // FTrace: log the guest return value (r3) on normal return.
   if (IsTracingFunc()) {
     mov(GetNativeParam(0), current_guest_function_);
@@ -435,26 +444,7 @@ void X64Emitter::DebugBreak() {
 }
 
 uint64_t TrapDebugPrint(void* raw_context, uint64_t address) {
-  auto thread_state =
-      reinterpret_cast<ppc::PPCContext_s*>(raw_context)->thread_state;
-  uint32_t str_ptr = uint32_t(thread_state->context()->r[3]);
-  uint32_t str_length = uint32_t(thread_state->context()->r[4]);
-
-  auto str = thread_state->memory()->TranslateVirtual<const char*>(str_ptr);
-
-  // Allocate temporary buffer and null-terminate to respect length parameter
-  char* string_tmp = new char[str_length + 1];
-  std::memcpy(string_tmp, str, str_length);
-  string_tmp[str_length] = 0;
-
-  XELOGD("(DebugPrint) {}", string_tmp);
-
-  if (cvars::debugprint_trap_log) {
-    debugging::DebugPrint("(DebugPrint) {}", string_tmp);
-  }
-
-  delete[] string_tmp;
-  return 0;
+  return backend::TrapDebugPrint(raw_context);
 }
 
 uint64_t TrapDebugBreak(void* raw_context, uint64_t address) {

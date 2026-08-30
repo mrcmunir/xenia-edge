@@ -230,9 +230,12 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     while (instr) {
       // After a guest call, check for longjmp on the next real instruction.
       // Skip SOURCE_OFFSET because the return address from the call would
-      // point past the check, so it would never execute.
+      // point past the check, so it would never execute. With debug info on a
+      // COMMENT precedes the SOURCE_OFFSET, so skip that too.
       if (synchronize_stack_on_next_instruction_) {
-        if (instr->GetOpcodeNum() != hir::OPCODE_SOURCE_OFFSET) {
+        const hir::Opcode opcode_num = instr->GetOpcodeNum();
+        if (opcode_num != hir::OPCODE_SOURCE_OFFSET &&
+            opcode_num != hir::OPCODE_COMMENT) {
           synchronize_stack_on_next_instruction_ = false;
           EnsureSynchronizedGuestAndHostStack();
         }
@@ -273,6 +276,11 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // ========================================================================
   L(*epilog_label_);
   epilog_label_ = nullptr;
+  // A call as the last instruction leaves the check unconsumed.
+  if (synchronize_stack_on_next_instruction_) {
+    synchronize_stack_on_next_instruction_ = false;
+    EnsureSynchronizedGuestAndHostStack();
+  }
   // FTrace: log the guest return value (r3) on normal return.
   if (IsTracingFunc()) {
     mov(x1, static_cast<uint64_t>(current_guest_function_));
@@ -442,7 +450,33 @@ void A64Emitter::RecordSequenceSample(const hir::Instr* i, uint32_t backend_key,
 
 void A64Emitter::DebugBreak() { brk(0xF000); }
 
-void A64Emitter::Trap(uint16_t trap_type) { brk(trap_type); }
+static uint64_t TrapDebugBreak(void*) {
+  XELOGE("tw/td forced trap hit! This should be a crash!");
+  if (cvars::break_on_debugbreak) {
+    xe::debugging::Break();
+  }
+  return 0;
+}
+
+void A64Emitter::Trap(uint16_t trap_type) {
+  switch (trap_type) {
+    case 20:
+    case 26:
+      CallNative(reinterpret_cast<void*>(&backend::TrapDebugPrint));
+      break;
+    case 0:
+    case 22:
+      CallNative(reinterpret_cast<void*>(&TrapDebugBreak));
+      break;
+    case 25:
+      break;
+    default:
+      XELOGW("Unknown trap type {}", trap_type);
+      // Not brk #0: that is the breakpoint encoding.
+      brk(0xF002);
+      break;
+  }
+}
 
 void A64Emitter::b(const Xbyak_aarch64::Cond cond,
                    const Xbyak_aarch64::Label& label) {
