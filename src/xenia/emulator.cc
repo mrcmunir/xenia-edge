@@ -785,7 +785,18 @@ X_STATUS Emulator::LaunchStfsContainer(const std::filesystem::path& path) {
   if (result == X_STATUS_NOT_FOUND && !cvars::launch_module.empty()) {
     return LaunchDefaultModule(path);
   }
-  kernel_state_->deployment_type_ = XDeploymentType::kDownload;
+
+  auto* container = dynamic_cast<vfs::XContentContainerDevice*>(
+      file_system_->GetDevice("\\Device\\Package_0"));
+  const uint32_t content_type = container ? container->content_type() : 0;
+  // A disc rip installed to the HDD still runs as a disc title.
+  const bool is_disc_content =
+      content_type == static_cast<uint32_t>(XContentType::kInstalledGame);
+  kernel_state_->deployment_type_ = is_disc_content
+                                        ? XDeploymentType::kOpticalDisc
+                                        : XDeploymentType::kDownload;
+  XELOGI("LaunchStfsContainer: content type {:08X}, running as {}",
+         content_type, is_disc_content ? "optical disc" : "download");
   return result;
 }
 
@@ -1572,7 +1583,8 @@ const std::filesystem::path Emulator::GetNewDiscPath(
     xe::threading::Fence fence;
     display_window_->app_context().CallInUIThreadSynchronous([&, this]() {
       auto* dialog = new kernel::xam::ui::DiscSwapUI(
-          imgui_drawer_, window_message, disc_infos, show_error);
+          imgui_drawer_, input_system_.get(), window_message, disc_infos,
+          show_error);
       dialog->set_close_callback([&result, &selected_path, dialog]() {
         result = dialog->result();
         selected_path = dialog->selected_path();
@@ -1580,8 +1592,9 @@ const std::filesystem::path Emulator::GetNewDiscPath(
       dialog->Then(&fence);
     });
 
-    // Wait for the dialog to close
-    fence.Wait();
+    // Wait for the dialog to close. Parks the fiber the way every other xam
+    // dialog does, so the guest CPU stays free while the prompt is up.
+    kernel::GuestScheduler::WaitOnFence(fence);
 
     // Process the result
     if (result == kernel::xam::ui::DiscSwapResult::kSelected) {
@@ -2058,8 +2071,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
 
   if (!info) {
     title_id_ = 0;
+    current_disc_number_ = 0;
   } else {
     title_id_ = info->title_id;
+    current_disc_number_ = info->disc_number;
     auto title_version = info->version();
     if (title_version.value != 0) {
       title_version_ = format_version(title_version);

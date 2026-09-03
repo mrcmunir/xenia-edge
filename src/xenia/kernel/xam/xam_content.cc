@@ -131,13 +131,20 @@ dword_result_t xeXamContentResolve(
       }
     }
 
-    const std::string relative_path = fmt::format(
-        "{:016X}\\{:08X}\\{:08X}\\{}", xuid, kernel_state()->title_id(),
-        static_cast<uint32_t>(content_data.content_type.get()),
-        content_data.file_name());
+    const std::string relative_dir =
+        fmt::format("{:016X}\\{:08X}\\{:08X}", xuid, kernel_state()->title_id(),
+                    static_cast<uint32_t>(content_data.content_type.get()));
+    const std::string content_dir = root_device_path + relative_dir;
 
-    string_util::copy_truncating(path_ptr, root_device_path + relative_path,
-                                 path_size);
+    // The caller creates the package file itself, so the directory must exist.
+    if (create_directory && !kernel_state()->file_system()->CreatePath(
+                                content_dir, vfs::kFileAttributeDirectory)) {
+      XELOGW("XamContentResolve: Cannot create content directory {}",
+             content_dir);
+    }
+
+    string_util::copy_truncating(
+        path_ptr, content_dir + "\\" + content_data.file_name(), path_size);
 
     // Check if it exists and try to mount that package
     // Result of buffer_ptr is sent to RtlInitAnsiString.
@@ -718,7 +725,7 @@ dword_result_t XamSwapDisc_entry(
     }
   };
 
-  if (info->disc_number == disc_number) {
+  if (kernel_state()->emulator()->current_disc_number() == disc_number) {
     completion_event();
     return X_ERROR_SUCCESS;
   }
@@ -837,6 +844,9 @@ dword_result_t XamSwapDisc_entry(
             uint8_t(exec_info.disc_number), uint8_t(exec_info.disc_count),
             uint32_t(exec_info.title_id), uint32_t(exec_info.media_id));
 
+        kernel_state()->emulator()->set_current_disc_number(
+            exec_info.disc_number);
+
         std::string disc_label;
         if (exec_info.disc_count > 1 && exec_info.disc_number > 0) {
           disc_label = fmt::format("Disc {}", uint8_t(exec_info.disc_number));
@@ -870,6 +880,9 @@ dword_result_t XamSwapDisc_entry(
       if (xam) {
         xam->loader_data().host_path = xe::path_to_utf8(new_disc_path);
       }
+
+      kernel_state()->emulator()->set_current_disc_number(
+          static_cast<uint8_t>(disc_number));
 
       // For non-container devices, accept them (backward compatibility)
       break;

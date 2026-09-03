@@ -32,7 +32,7 @@
 #include "third_party/crypto/TinySHA1.hpp"
 
 DEFINE_bool(apply_title_update, true, "Apply title updates.", "Kernel");
-DEFINE_bool(allow_incompatible_title_update, true,
+DEFINE_bool(allow_incompatible_title_update, false,
             "Allow title updates with mismatched signatures to be applied.",
             "Kernel");
 
@@ -704,8 +704,21 @@ X_RESULT KernelState::ApplyTitleUpdate(
       XELOGW(
           "Skipping incompatible title update for {} due to signature mismatch",
           title_module->name());
+      if (!GetExecutableModule()) {
+        emulator_->display_window()->app_context().CallInUIThread([&]() {
+          new xe::ui::HostNotificationWindow(
+              emulator_->imgui_drawer(), "Warning!",
+              "Title Update signature doesn't match. Skipping its application!",
+              0);
+        });
+      }
       return X_STATUS_SUCCESS;
     }
+
+    XELOGW(
+        "Applying incompatible title update for {} due to enabled "
+        "allow_incompatible_title_update config option!",
+        title_module->name());
 
     // First module that is loaded is always main executable. That way we can
     // prevent random message spam in case of loading/unloading.
@@ -763,10 +776,16 @@ const object_ref<UserModule> KernelState::LoadTitleUpdate(
   const std::string relative_path =
       module->path().substr(mount_path.size() + 1) + 'p';
 
+  // A multi-disc update mounts at discNNN inside the package, so the target
+  // no longer always ends in a separator.
+  const std::string patch_guest_path =
+      xe::utf8::join_guest_paths(resolved_path, relative_path);
+
   xe::vfs::Entry* patch_entry =
-      kernel_state()->file_system()->ResolvePath(resolved_path + relative_path);
+      kernel_state()->file_system()->ResolvePath(patch_guest_path);
 
   if (!patch_entry) {
+    XELOGI("Loading XEX patch failed. Path doesn't exist {}", patch_guest_path);
     return nullptr;
   }
 
@@ -1323,6 +1342,11 @@ void KernelState::EndDPCImpersonation(cpu::ppc::PPCContext* context,
 void KernelState::EmulateCPInterruptDPC(uint32_t interrupt_callback,
                                         uint32_t interrupt_callback_data,
                                         uint32_t source, uint32_t cpu) {
+  // Source 0 is vblank, where the console's graphics DPC enters background
+  // mode. Before the callback check, which the console also does without one.
+  if (source == 0 && GuestScheduler::enabled()) {
+    guest_scheduler()->EnterBackgroundMode();
+  }
   if (!interrupt_callback) {
     return;
   }
@@ -1360,6 +1384,18 @@ void KernelState::EmulateCPInterruptDPC(uint32_t interrupt_callback,
   xboxkrnl::xeKeSetCurrentProcessType(X_PROCTYPE_IDLE, current_context);
 
   EndDPCImpersonation(current_context, dpc_scope);
+}
+
+uint32_t KernelState::GetBackgroundProcessors() {
+  return memory()
+      ->TranslateVirtual<KernelGuestGlobals*>(GetKernelGuestGlobals())
+      ->background_processors;
+}
+
+void KernelState::SetBackgroundProcessors(uint32_t processors) {
+  memory()
+      ->TranslateVirtual<KernelGuestGlobals*>(GetKernelGuestGlobals())
+      ->background_processors = processors;
 }
 
 void KernelState::InitializeProcess(X_KPROCESS* process, uint32_t type,
@@ -1599,6 +1635,11 @@ void KernelState::InitializeKernelGuestGlobals() {
        kernel_guest_globals_ +
            offsetof32(KernelGuestGlobals, IoDeviceObjectType)}};
   xboxkrnl::xeKeSetEvent(&block->UsbdBootEnumerationDoneEvent, 1, 0);
+
+  // Matches the console's boot value: CPUs 2-5 take background-scheduling
+  // windows, and a title can move that with KeSetBackgroundProcessors.
+  memory_->TranslateVirtual<KernelGuestGlobals*>(kernel_guest_globals_)
+      ->background_processors = 0x3C;
 
   // Initialize timestamp bundle early to avoid race conditions with update
   // timer and ensure deterministic initial values at kernel boot time

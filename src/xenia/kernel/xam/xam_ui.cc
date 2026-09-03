@@ -286,7 +286,9 @@ void KeyboardInputDialog::OnDraw(ImGuiIO& io) {
   // Center the window on screen
   ImVec2 center = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
   ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-  ImGui::SetNextWindowSizeConstraints(ImVec2(350, 0), ImVec2(500, 300));
+  // Size constraints leave an auto-resize popup a pixel short of its contents
+  ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 30.0f, 0.0f),
+                           ImGuiCond_Always);
 
   // Style like Xbox - white background, black text, Xbox green highlights
   const ImVec4 xbox_green(0.063f, 0.486f, 0.063f, 1.0f);
@@ -665,10 +667,14 @@ dword_result_t XamShowDeviceSelectorUI_entry(
 }
 DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
 
-void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
+void XamShowDirtyDiscErrorUI_entry(dword_t user_index,
+                                   const ppc_context_t& context) {
+  XELOGE("XamShowDirtyDiscErrorUI: title reported a disc read error, lr {:08X}",
+         uint32_t(context->lr));
+
   if (cvars::headless) {
     assert_always();
-    exit(1);
+    kernel_state()->TerminateTitle();
     return;
   }
 
@@ -683,9 +689,8 @@ void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
   xeXamDispatchDialog<MessageBoxDialog>(
       new MessageBoxDialog(imgui_drawer, input_system, title, desc, {"OK"}, 0),
       [](MessageBoxDialog*) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
-  // This is death, and should never return.
-  // TODO(benvanik): cleaner exit.
-  exit(1);
+  // Does not return.
+  kernel_state()->ExitToDashboard();
 }
 DECLARE_XAM_EXPORT1(XamShowDirtyDiscErrorUI, kUI, kImplemented);
 
